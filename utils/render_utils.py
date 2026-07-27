@@ -292,6 +292,8 @@ def render_with_blender(
             str(tmp_root_path),
             "--views",
             str(max(total_train_frames, 1)),
+            "--seed",
+            str(args.blender_seed),
         ]
 
         cmd.append("--disable-animation")

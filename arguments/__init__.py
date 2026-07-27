@@ -73,6 +73,7 @@ class ModelParams(ParamGroup["ModelParams"]):
     use_blender: bool
     blender_executable: str
     blender_asset_root: str
+    blender_seed: int
     source_path: str
     model_path: str
     images: str
@@ -104,6 +105,7 @@ class ModelParams(ParamGroup["ModelParams"]):
         self.use_blender = False
         self.blender_executable = "blender"
         self.blender_asset_root = ""
+        self.blender_seed = 0
         self.camera_offset = 0.0
         self.pretrained_ply = ""
         self.n_train_images = 1

@@ -68,7 +68,7 @@ class RenderConfig:
     img_format: str
     color_depth: int
     trajectory_name: str
-    seed: Optional[int] = None
+    seed: int = 0
     num_cams: int = 1
     start: int = 0
     end: Optional[int] = None
@@ -112,7 +112,7 @@ def parse_args(argv: List[str]) -> RenderConfig:
         choices=list(TRAJ_REGISTRY.keys()),
         default="random_upper",
     )
-    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--num-cams", dest="num_cams", type=int, default=1)
     parser.add_argument("--start", type=int, default=0)
     parser.add_argument("--end", type=int, default=None)
@@ -241,12 +241,14 @@ def ensure_camera_exists(name: str, template: bpy.types.Object) -> bpy.types.Obj
     return new_cam
 
 
-def enable_cycles_and_gpus() -> None:
+def enable_cycles_and_gpus(seed: int) -> None:
     bpy.context.scene.render.engine = "CYCLES"
     scn = bpy.context.scene
     scn.render.use_persistent_data = True
     scn.cycles.use_adaptive_sampling = True
     scn.cycles.use_denoising = True
+    scn.cycles.seed = seed
+    scn.cycles.use_animated_seed = False
 
     try:
         prefs = bpy.context.preferences
@@ -693,10 +695,9 @@ def render(
 
 
 def run(cfg: RenderConfig):
-    if cfg.seed is not None:
-        np.random.seed(cfg.seed)
+    np.random.seed(cfg.seed)
 
-    enable_cycles_and_gpus()
+    enable_cycles_and_gpus(cfg.seed)
     configure_image_output(cfg.img_format, cfg.color_depth)
 
     arm_anim = cfg.create_arm_animator()
