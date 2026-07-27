@@ -71,6 +71,8 @@ class ModelParams(ParamGroup["ModelParams"]):
     use_iphone: bool
     iphone_same_focal_length: bool
     use_blender: bool
+    blender_executable: str
+    blender_asset_root: str
     source_path: str
     model_path: str
     images: str
@@ -100,6 +102,8 @@ class ModelParams(ParamGroup["ModelParams"]):
         self.use_iphone = False
         self.iphone_same_focal_length = False
         self.use_blender = False
+        self.blender_executable = "blender"
+        self.blender_asset_root = ""
         self.camera_offset = 0.0
         self.pretrained_ply = ""
         self.n_train_images = 1

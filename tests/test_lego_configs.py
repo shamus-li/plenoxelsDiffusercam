@@ -1,7 +1,6 @@
 import os
 import shutil
 import tempfile
-import types
 import unittest
 from argparse import ArgumentParser
 from pathlib import Path
@@ -10,7 +9,6 @@ from typing import Dict, Iterable, Optional, Sequence, Tuple
 import torch
 import torch.nn.functional as F
 
-import train_sim_multiviews as tsm
 from arguments import ModelParams, OptimizationParams, PipelineParams
 from gaussian_renderer import render
 from lpipsPyTorch import lpips
@@ -65,16 +63,6 @@ def _build_params(
     return model_params, optim_params, pipe_params
 
 
-def _wandb_stub():
-    stub = types.SimpleNamespace(
-        init=lambda *a, **k: None,
-        login=lambda *a, **k: None,
-        log=lambda *a, **k: None,
-        Image=lambda *a, **k: None,
-    )
-    return stub
-
-
 def _train_and_load(
     model_params: ModelParams,
     opt_params: OptimizationParams,
@@ -86,25 +74,21 @@ def _train_and_load(
     model_params.model_path = str(cache_dir)
     opt_params.iterations = TRAIN_ITERS
 
-    # Override wandb with no-ops during training to avoid external dependencies
-    original_wandb = tsm.wandb
-    tsm.wandb = _wandb_stub()
-    try:
-        training(
-            dataset=model_params,
-            opt=opt_params,
-            pipe=pipe_params,
-            testing_iterations=[],
-            saving_iterations=[TRAIN_ITERS],
-            debug_from=TRAIN_ITERS + 1,
-            resolution=1,
-            dls=dls if dls is not None else 20,
-            size_threshold_arg=150,
-            extent_multiplier=1.0,
-            include_test_cameras=True,
-        )
-    finally:
-        tsm.wandb = original_wandb
+    training(
+        dataset=model_params,
+        opt=opt_params,
+        pipe=pipe_params,
+        testing_iterations=[],
+        saving_iterations=[TRAIN_ITERS],
+        checkpoint_iterations=[],
+        checkpoint=None,
+        debug_from=TRAIN_ITERS + 1,
+        resolution=1,
+        dls=dls if dls is not None else 20,
+        size_threshold_arg=150,
+        extent_multiplier=1.0,
+        include_test_cameras=True,
+    )
 
     original_use_blender = model_params.use_blender
     model_params.use_blender = False

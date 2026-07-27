@@ -261,7 +261,12 @@ def render_with_blender(
 
     project_root = Path(__file__).resolve().parents[1]
     render_script = project_root / "blender" / "render_blender.py"
-    blend_file = project_root / "blender" / f"{dataset_name}.blend"
+    asset_root = (
+        Path(args.blender_asset_root).expanduser().resolve()
+        if args.blender_asset_root
+        else project_root
+    )
+    blend_file = asset_root / "blender" / f"{dataset_name}.blend"
 
     if not blend_file.exists():
         raise FileNotFoundError(
@@ -275,11 +280,7 @@ def render_with_blender(
         tmp_root_path = Path(tmp_root)
         total_train_frames = max(len(frame_lookup), 1)
         cmd = [
-            "conda",
-            "run",
-            "-n",
-            "blender",
-            "blender",
+            str(args.blender_executable),
             "-b",
             str(blend_file),
             "-P",

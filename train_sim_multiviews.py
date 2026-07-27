@@ -1,14 +1,15 @@
+import json
 import os
 import random
 import sys
 import uuid
 from argparse import ArgumentParser, Namespace
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 from tqdm import tqdm
 
-import wandb
 from arguments import ModelParams, OptimizationParams, PipelineParams
 from gaussian_renderer import render
 from lpipsPyTorch import lpips
@@ -87,23 +88,23 @@ def collect_validation_configs(scene: Scene) -> List[Dict[str, Any]]:
     ]
 
 
-def should_log_wandb_images(
+def should_log_eval_images(
     iteration: int,
     testing_iterations: List[int],
-    wandb_image_interval: int,
-    enable_wandb_images: bool,
+    eval_image_interval: int,
+    enable_eval_images: bool,
 ) -> bool:
     """
     Decide whether to emit W&B image artifacts for this iteration.
     Matches original logic while centralizing decision-making.
     """
-    if not enable_wandb_images or not testing_iterations:
+    if not enable_eval_images or not testing_iterations:
         return False
 
-    if wandb_image_interval <= 0:
+    if eval_image_interval <= 0:
         return iteration == testing_iterations[-1]
 
-    return iteration % wandb_image_interval == 0 or iteration == testing_iterations[-1]
+    return iteration % eval_image_interval == 0 or iteration == testing_iterations[-1]
 
 
 def training(
@@ -120,9 +121,9 @@ def training(
     size_threshold_arg: int,
     extent_multiplier: float,
     include_test_cameras: bool = False,
-    wandb_image_interval: int = 0,
-    wandb_max_images: int = 1,
-    wandb_disable_eval_images: bool = False,
+    eval_image_interval: int = 0,
+    max_eval_images: int = 1,
+    disable_eval_images: bool = False,
 ):
     tb_writer, model_path = prepare_output_and_logger(dataset)
 
@@ -130,19 +131,6 @@ def training(
     scene = Scene(dataset, gaussians, include_test_cameras=include_test_cameras)
     gaussians.training_setup(opt)
 
-    initial_log: Dict[str, float] = {}
-    if getattr(scene, "avg_angle", None) is not None:
-        initial_log["average_angle"] = float(scene.avg_angle)
-    group_metrics = getattr(scene, "group_metrics", {}) or {}
-    for gid, values in group_metrics.items():
-        angle_val = values.get("angle_deg")
-        dist_val = values.get("distance_m")
-        if angle_val is not None:
-            initial_log[f"camera_groups/{gid}/angle_deg"] = float(angle_val)
-        if dist_val is not None:
-            initial_log[f"camera_groups/{gid}/distance_m"] = float(dist_val)
-    if initial_log:
-        wandb.log(initial_log, step=0)
     log_initial_scene_summary(scene, opt)
 
     if dataset.use_multiplexing:
@@ -171,6 +159,7 @@ def training(
     view_indices = list(all_train_cameras.keys())
     available_view_indices: List[int] = []
 
+    final_report: Dict[str, float] = {}
     for iteration in range(1, opt.iterations + 1):
         iter_start.record()
         gaussians.update_learning_rate(iteration)
@@ -291,7 +280,7 @@ def training(
                 progress_bar.close()
 
             # Log and save
-            training_report(
+            report = training_report(
                 tb_writer,
                 iteration,
                 loss,
@@ -316,10 +305,12 @@ def training(
                 if dataset.use_multiplexing
                 else None,
                 gt_image,
-                wandb_image_interval,
-                wandb_max_images,
-                not wandb_disable_eval_images,
+                eval_image_interval,
+                max_eval_images,
+                not disable_eval_images,
             )
+            if iteration in testing_iterations:
+                final_report = report
             if iteration in saving_iterations:
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
@@ -369,6 +360,7 @@ def training(
             if iteration < opt.iterations:
                 gaussians.optimizer.step()
                 gaussians.optimizer.zero_grad(set_to_none=True)
+    return final_report
 
 
 def tv_2d(image: torch.Tensor) -> torch.Tensor:
@@ -419,10 +411,10 @@ def training_report(
         Tuple[torch.Tensor, List[int], int, int, int, int]
     ] = None,
     gt_image: Optional[torch.Tensor] = None,
-    wandb_image_interval: int = 0,
-    wandb_max_images: int = 1,
-    enable_wandb_images: bool = True,
-):
+    eval_image_interval: int = 0,
+    max_eval_images: int = 1,
+    enable_eval_images: bool = True,
+) -> Dict[str, float]:
     subset_cameras = random.sample(scene.getFullTestCameras(), 10)
     l1_subset, psnr_subset = 0.0, 0.0
     for viewpoint in subset_cameras:
@@ -448,13 +440,12 @@ def training_report(
         for key, value in log_dict.items():
             tb_writer.add_scalar(key, value, iteration)
 
-    img_dict: Dict[str, Any] = {}
     if iteration in testing_iterations:
-        log_images_this_iter = should_log_wandb_images(
+        log_images_this_iter = should_log_eval_images(
             iteration,
             testing_iterations,
-            wandb_image_interval,
-            enable_wandb_images and wandb_max_images > 0,
+            eval_image_interval,
+            enable_eval_images and max_eval_images > 0,
         )
 
         validation_configs = collect_validation_configs(scene)
@@ -469,7 +460,7 @@ def training_report(
                 out = render(viewpoint, scene.gaussians, *renderArgs)["render"]
                 gt = viewpoint.original_image.to(device)
 
-                if log_images_this_iter and idx < wandb_max_images:
+                if log_images_this_iter and idx < max_eval_images:
                     out_render = heteroscedastic_noise(
                         out, opt.lambda_read, opt.lambda_shot
                     )
@@ -485,9 +476,6 @@ def training_report(
                             gt[None],
                             global_step=iteration,
                         )
-                    img_dict[f"render/{config['name']}_{viewpoint.image_name}"] = (
-                        wandb.Image(out_render.cpu())
-                    )
 
                 l1_test += l1_loss(out, gt).mean().double()
                 psnr_test += psnr(out, gt).mean().double()
@@ -529,15 +517,13 @@ def training_report(
                     multiplexed_image.unsqueeze(0),
                     global_step=iteration,
                 )
-            img_dict["render/trained_multiplex"] = wandb.Image(multiplexed_image.cpu())
 
         if gt_image is not None:
             if tb_writer:
                 tb_writer.add_images(
                     "render/gt_image", gt_image.unsqueeze(0), global_step=iteration
                 )
-            img_dict["render/gt_image"] = wandb.Image(gt_image.cpu())
-    wandb.log({**log_dict, **img_dict}, step=iteration)
+    return log_dict
 
 
 if __name__ == "__main__":
@@ -575,26 +561,32 @@ if __name__ == "__main__":
     parser.add_argument("--extent_multiplier", type=float, default=1.0)
     parser.add_argument("--output-id", type=str, default="3")
     parser.add_argument(
-        "--wandb_image_interval",
+        "--eval_image_interval",
         type=int,
         default=0,
-        help="Log W&B evaluation images every N test iterations (0 logs only final iteration).",
+        help="Log TensorBoard evaluation images every N test iterations (0 logs only final).",
     )
     parser.add_argument(
-        "--wandb_max_images",
+        "--max_eval_images",
         type=int,
         default=1,
-        help="Maximum number of images per validation set to upload when enabled.",
+        help="Maximum number of TensorBoard images per validation set.",
     )
     parser.add_argument(
-        "--wandb_disable_eval_images",
+        "--disable_eval_images",
         action="store_true",
-        help="Disable logging evaluation render images to W&B.",
+        help="Disable TensorBoard evaluation render images.",
     )
     parser.add_argument(
         "--skip_train",
         action="store_true",
         help="Generate camera trajectories and configuration without running training",
+    )
+    parser.add_argument(
+        "--metrics_output",
+        type=str,
+        default="",
+        help="Optional JSON path for the final scalar training and evaluation metrics.",
     )
     args = parser.parse_args(sys.argv[1:])
 
@@ -638,12 +630,7 @@ if __name__ == "__main__":
         print(f"Transforms written to {transforms_path}")
         sys.exit(0)
 
-    wandb.login()
-    wandb.init(
-        name=run_name, save_code=False, settings=wandb.Settings(_disable_stats=True)
-    )
-
-    training(
+    metrics = training(
         dataset=dataset,
         opt=opt,
         pipe=pipe,
@@ -656,10 +643,17 @@ if __name__ == "__main__":
         dls=args.dls,
         size_threshold_arg=args.size_threshold,
         extent_multiplier=args.extent_multiplier,
-        wandb_image_interval=args.wandb_image_interval,
-        wandb_max_images=args.wandb_max_images,
-        wandb_disable_eval_images=args.wandb_disable_eval_images,
+        eval_image_interval=args.eval_image_interval,
+        max_eval_images=args.max_eval_images,
+        disable_eval_images=args.disable_eval_images,
     )
+    if args.metrics_output:
+        output = Path(args.metrics_output).expanduser().resolve()
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(
+            json.dumps(metrics, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
 
     # All done
     print("\nTraining complete.")
