@@ -2,10 +2,9 @@ import os
 import random
 import sys
 from argparse import ArgumentParser
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 import torch
-import wandb
 from torch.profiler import ProfilerActivity, profile, record_function
 from tqdm import tqdm
 
@@ -17,7 +16,6 @@ from utils.general_utils import safe_state
 from utils.image_utils import heteroscedastic_noise, quantize_14bit
 from utils.loss_utils import l1_loss, ssim
 from utils.train_utils import (
-    WandbImageConfig,
     compose_run_name,
     group_train_cameras,
     log_initial_scene_summary,
@@ -62,10 +60,10 @@ def training(
     dls: float,
     size_threshold: int,
     extent_multiplier: float,
-    wandb_images: WandbImageConfig,
+    max_eval_images: int,
     profile_gpu: bool,
     tb_writer,
-    wandb_module,
+    loss_fn: Callable[[torch.Tensor, torch.Tensor, object], torch.Tensor],
 ) -> None:
     if device.type != "cuda":
         raise RuntimeError(
@@ -76,11 +74,6 @@ def training(
 
     print("lambda_dssim", opt.lambda_dssim)
 
-    initial_log: Dict[str, float] = {}
-    if getattr(scene, "avg_angle", None) is not None:
-        initial_log["average_angle"] = float(scene.avg_angle)
-    if initial_log:
-        wandb_module.log(initial_log, step=0)
     log_initial_scene_summary(scene, opt)
 
     H = W = 0
@@ -255,8 +248,8 @@ def training(
                             if (lambda_read > 0.0 or lambda_shot > 0.0)
                             else rendered_image
                         )
-                        L_l1 = (1.0 - opt.lambda_dssim) * l1_loss(
-                            rendered_for_loss, gt_image
+                        L_l1 = (1.0 - opt.lambda_dssim) * loss_fn(
+                            rendered_for_loss, gt_image, viewpoint_cam[0]
                         )
                         ssim_term = opt.lambda_dssim * (
                             1.0 - ssim(rendered_for_loss, gt_image)
@@ -291,7 +284,7 @@ def training(
 
                             L_l1_per_cam.append(
                                 (1.0 - opt.lambda_dssim)
-                                * l1_loss(rendered_for_loss, gt_image)
+                                * loss_fn(rendered_for_loss, gt_image, cam)
                             )
                             ssim_per_cam.append(
                                 opt.lambda_dssim
@@ -384,10 +377,9 @@ def training(
                 pipe=pipe,
                 background=background,
                 device=device,
-                wandb_images=wandb_images,
+                max_eval_images=max_eval_images,
                 testing_iterations=testing_iterations,
                 tb_writer=tb_writer,
-                wandb_module=wandb_module,
                 multiplexing_args=multiplexing_args,
                 summary_path=metrics_summary_path,
                 is_final_iteration=(iteration == opt.iterations),
@@ -484,21 +476,10 @@ if __name__ == "__main__":
     parser.add_argument("--extent_multiplier", type=float, default=1.0)
     parser.add_argument("--output-id", type=str, default="3")
     parser.add_argument(
-        "--wandb_image_interval",
-        type=int,
-        default=500,
-        help="Log W&B evaluation images every N test iterations (0 logs only final iteration).",
-    )
-    parser.add_argument(
-        "--wandb_max_images",
+        "--max_eval_images",
         type=int,
         default=5,
-        help="Maximum number of images per validation set to upload when enabled.",
-    )
-    parser.add_argument(
-        "--wandb_disable_eval_images",
-        action="store_true",
-        help="Disable logging evaluation render images to W&B.",
+        help="Maximum number of TensorBoard images per validation set.",
     )
     parser.add_argument(
         "--profile",
@@ -565,16 +546,10 @@ if __name__ == "__main__":
         print(f"Transforms written to {transforms_path}")
         sys.exit(0)
 
-    wandb.login()
-    wandb.init(
-        name=run_name, save_code=False, settings=wandb.Settings(_disable_stats=True)
-    )
-
-    wandb_images = WandbImageConfig(
-        interval=args.wandb_image_interval,
-        max_images=args.wandb_max_images,
-        enable_eval_images=not args.wandb_disable_eval_images,
-    )
+    def plain_l1_loss(
+        output: torch.Tensor, target: torch.Tensor, _camera: object
+    ) -> torch.Tensor:
+        return l1_loss(output, target)
 
     # Profiling wrapper
     if args.profile:
@@ -602,10 +577,10 @@ if __name__ == "__main__":
                     dls=args.dls,
                     size_threshold=args.size_threshold,
                     extent_multiplier=args.extent_multiplier,
-                    wandb_images=wandb_images,
+                    max_eval_images=args.max_eval_images,
                     profile_gpu=args.profile,
                     tb_writer=tb_writer,
-                    wandb_module=wandb,
+                    loss_fn=plain_l1_loss,
                 )
 
         # Print profiling results
@@ -656,10 +631,10 @@ if __name__ == "__main__":
             dls=args.dls,
             size_threshold=args.size_threshold,
             extent_multiplier=args.extent_multiplier,
-            wandb_images=wandb_images,
+            max_eval_images=args.max_eval_images,
             profile_gpu=args.profile,
             tb_writer=tb_writer,
-            wandb_module=wandb,
+            loss_fn=plain_l1_loss,
         )
 
     if tb_writer:

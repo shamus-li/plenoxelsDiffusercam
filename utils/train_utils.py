@@ -5,7 +5,6 @@ import os
 import random
 import uuid
 from argparse import Namespace
-from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import torch
@@ -30,7 +29,6 @@ from utils.loss_utils import l1_loss, ssim
 __all__ = [
     "TENSORBOARD_FOUND",
     "SummaryWriter",
-    "WandbImageConfig",
     "compose_run_name",
     "log_initial_scene_summary",
     "group_train_cameras",
@@ -101,25 +99,6 @@ def log_initial_scene_summary(scene: Scene, opt: OptimizationParams) -> None:
     print("Train cameras:", sum(len(c) for c in scene.getTrainCameras().values()))
     print("Adjacent test cameras:", len(scene.getTestCameras()))
     print("Full test cameras:", len(scene.getFullTestCameras()))
-
-
-@dataclass
-class WandbImageConfig:
-    interval: int
-    max_images: int
-    enable_eval_images: bool
-
-    def should_log(self, iteration: int, testing_iterations: List[int]) -> bool:
-        """Return True if this iteration should emit W&B image artifacts."""
-        if (
-            not self.enable_eval_images
-            or self.max_images <= 0
-            or not testing_iterations
-        ):
-            return False
-        if self.interval <= 0:
-            return iteration == testing_iterations[-1]
-        return iteration % self.interval == 0 or iteration == testing_iterations[-1]
 
 
 def group_train_cameras(
@@ -303,10 +282,9 @@ def training_report(
     pipe: PipelineParams,
     background: torch.Tensor,
     device: torch.device,
-    wandb_images: WandbImageConfig,
+    max_eval_images: int,
     testing_iterations: List[int],
     tb_writer,
-    wandb_module,
     gt_image: Optional[torch.Tensor] = None,
     extra_log: Optional[Dict[str, Any]] = None,
     multiplexing_args: Optional[
@@ -351,10 +329,7 @@ def training_report(
         for key, value in log_dict.items():
             tb_writer.add_scalar(key, value, iteration)
 
-    img_dict: Dict[str, Any] = {}
     if (iteration in testing_iterations) or is_final_iteration:
-        log_images_this_iter = wandb_images.should_log(iteration, testing_iterations) or is_final_iteration
-
         def _init_metric_accumulator() -> Dict[str, float]:
             return {"l1": 0.0, "psnr": 0.0, "ssim": 0.0, "lpips": 0.0, "count": 0.0}
 
@@ -372,12 +347,9 @@ def training_report(
             acc["lpips"] += float(lpips_val.item())
             acc["count"] += 1.0
 
-        any_split_images_logged = False
-
         def _evaluate_split(
             name: str, samples: Iterable[Dict[str, torch.Tensor]]
         ) -> None:
-            nonlocal any_split_images_logged
             metrics = _init_metric_accumulator()
             logged = 0
             lpips_metric = _get_lpips_metric(device, net_type="vgg")
@@ -390,7 +362,7 @@ def training_report(
 
                     _accumulate_metrics(metrics, pred, gt, lpips_metric)
 
-                    if log_images_this_iter and logged < wandb_images.max_images:
+                    if logged < max_eval_images:
                         pred_img = pred.detach().clamp(0.0, 1.0).cpu()
                         gt_img = gt.detach().clamp(0.0, 1.0).cpu()
                         if tb_writer:
@@ -404,13 +376,7 @@ def training_report(
                                 gt_img.unsqueeze(0),
                                 global_step=iteration,
                             )
-                        # Log both prediction and ground-truth frames to W&B
-                        img_dict[f"render/{name}_{label}"] = wandb_module.Image(
-                            pred_img
-                        )
-                        img_dict[f"gt/{name}_{label}"] = wandb_module.Image(gt_img)
                         logged += 1
-                        any_split_images_logged = True
 
             if metrics["count"] == 0:
                 return
@@ -500,19 +466,11 @@ def training_report(
                     multiplexed_image.unsqueeze(0),
                     global_step=iteration,
                 )
-            img_dict["render/trained_multiplex"] = wandb_module.Image(
-                multiplexed_image.cpu()
-            )
-
-        # Also log a single generic GT frame for quick reference
-        # Only add a generic GT frame if we didn't log any per-split images
-        if (not any_split_images_logged) and (gt_image is not None):
+        if gt_image is not None and max_eval_images > 0:
             if tb_writer:
                 tb_writer.add_images(
                     "render/gt_image", gt_image.unsqueeze(0), global_step=iteration
                 )
-            img_dict["render/gt_image"] = wandb_module.Image(gt_image.cpu())
-    wandb_module.log({**log_dict, **img_dict}, step=iteration)
 
     if summary_path and testing_iterations and iteration == testing_iterations[-1]:
         metrics_payload = {

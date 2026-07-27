@@ -1,7 +1,6 @@
 import os
 import shutil
 import tempfile
-import types
 import unittest
 from argparse import ArgumentParser
 from pathlib import Path
@@ -15,9 +14,9 @@ from gaussian_renderer import render
 from lpipsPyTorch import lpips
 from scene import GaussianModel, Scene
 from train_sim_multiviews import training
-from utils.train_utils import WandbImageConfig, prepare_output_and_logger
+from utils.train_utils import prepare_output_and_logger
 from utils.image_utils import psnr
-from utils.loss_utils import ssim
+from utils.loss_utils import l1_loss, ssim
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -65,16 +64,6 @@ def _build_params(
     return model_params, optim_params, pipe_params
 
 
-def _wandb_stub():
-    stub = types.SimpleNamespace(
-        init=lambda *a, **k: None,
-        login=lambda *a, **k: None,
-        log=lambda *a, **k: None,
-        Image=lambda *a, **k: None,
-    )
-    return stub
-
-
 def _train_and_load(
     model_params: ModelParams,
     opt_params: OptimizationParams,
@@ -110,12 +99,10 @@ def _train_and_load(
             dls=dls if dls is not None else 20,
             size_threshold=150,
             extent_multiplier=1.0,
-            wandb_images=WandbImageConfig(
-                interval=0, max_images=0, enable_eval_images=False
-            ),
-            profile_memory=False,
+            max_eval_images=0,
+            profile_gpu=False,
             tb_writer=tb_writer,
-            wandb_module=_wandb_stub(),
+            loss_fn=lambda output, target, _camera: l1_loss(output, target),
         )
     finally:
         if tb_writer:
