@@ -111,6 +111,8 @@ class Scene:
                 args.eval,
                 n_train_images=args.n_train_images,
                 use_orbital_trajectory=args.use_orbital_trajectory,
+                test_transforms=args.test_transforms,
+                scene_scale_transforms=args.scene_scale_transforms,
             )
 
             # re-rendering new views based on pretrained ply

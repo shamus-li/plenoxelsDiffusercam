@@ -82,6 +82,8 @@ class ModelParams(ParamGroup["ModelParams"]):
     white_background: bool
     camera_offset: float
     pretrained_ply: str
+    test_transforms: str
+    scene_scale_transforms: str
     n_train_images: int
     use_orbital_trajectory: bool
     world_to_m: float
@@ -108,6 +110,8 @@ class ModelParams(ParamGroup["ModelParams"]):
         self.blender_seed = 0
         self.camera_offset = 0.0
         self.pretrained_ply = ""
+        self.test_transforms = "transforms_test.json"
+        self.scene_scale_transforms = ""
         self.n_train_images = 1
         self.use_orbital_trajectory = False
         self.world_to_m = 99.04 / 1000

@@ -204,7 +204,12 @@ def read_cameras_from_transforms(
 ) -> Tuple[Dict[int, List[CameraInfo]], List[CameraInfo]]:
     train_cameras_info, test_cameras_info = defaultdict(list), []
 
-    with open(os.path.join(path, train_transforms_file)) as json_file:
+    train_path = (
+        train_transforms_file
+        if os.path.isabs(train_transforms_file)
+        else os.path.join(path, train_transforms_file)
+    )
+    with open(train_path) as json_file:
         contents = json.load(json_file)
         fov_x = contents["camera_angle_x"]
         frames = contents["frames"]
@@ -213,7 +218,9 @@ def read_cameras_from_transforms(
             image_name: str = frame["file_path"].split("/")[-1]
             parts = image_name.split("_")
             index = int(parts[1])
-            image_filepath = os.path.join(path, frame["file_path"] + extension)
+            image_filepath = os.path.join(
+                os.path.dirname(train_path), frame["file_path"] + extension
+            )
             train_cameras_info[index].append(
                 read_camera(
                     image_filepath,
@@ -225,7 +232,12 @@ def read_cameras_from_transforms(
                 )
             )
 
-    with open(os.path.join(path, test_transforms_file)) as json_file:
+    test_path = (
+        test_transforms_file
+        if os.path.isabs(test_transforms_file)
+        else os.path.join(path, test_transforms_file)
+    )
+    with open(test_path) as json_file:
         contents = json.load(json_file)
         fov_x = contents["camera_angle_x"]
         frames = contents["frames"]
@@ -234,7 +246,9 @@ def read_cameras_from_transforms(
             image_name: str = frame["file_path"].split("/")[-1]
             parts = image_name.split("_")
             index = int(parts[1])
-            image_filepath = os.path.join(path, frame["file_path"] + extension)
+            image_filepath = os.path.join(
+                os.path.dirname(test_path), frame["file_path"] + extension
+            )
             camera_info = read_camera(
                 image_filepath,
                 image_name,
@@ -255,6 +269,8 @@ def readNerfSyntheticInfo(
     extension: str = ".png",
     n_train_images: int = 1,
     use_orbital_trajectory: bool = False,
+    test_transforms: str = "transforms_test.json",
+    scene_scale_transforms: str = "",
 ) -> SceneInfo:
     print(f"Reading Nerf synthetic scene from {path}")
     train_transforms_file = (
@@ -262,7 +278,7 @@ def readNerfSyntheticInfo(
         if not use_orbital_trajectory
         else "orbital_trajectory.json"
     )
-    test_transforms_file = "transforms_test.json"
+    test_transforms_file = test_transforms
 
     train_cameras_info, full_test_cameras_info = read_cameras_from_transforms(
         path, train_transforms_file, test_transforms_file, white_background, extension
@@ -319,9 +335,25 @@ def readNerfSyntheticInfo(
     test_cameras_info = [
         cam for cam in full_test_cameras_info if cam.uid in adjacent_views
     ]
-    nerf_normalization = getNerfppNorm(all_train_cameras_list)
+    normalization_cameras = all_train_cameras_list
+    if scene_scale_transforms:
+        scale_cameras, _ = read_cameras_from_transforms(
+            path,
+            scene_scale_transforms,
+            scene_scale_transforms,
+            white_background,
+            extension,
+        )
+        normalization_cameras = [
+            camera for cameras in scale_cameras.values() for camera in cameras
+        ]
+    nerf_normalization = getNerfppNorm(normalization_cameras)
 
-    pcd, ply_path = generate_random_pcd(path, num_pts=100_000)
+    ply_path = os.path.join(path, "points3d.ply")
+    if os.path.isfile(ply_path):
+        pcd = fetchPly(ply_path)
+    else:
+        pcd, ply_path = generate_random_pcd(path, num_pts=100_000)
     scene_info = SceneInfo(
         point_cloud=pcd,
         train_cameras=train_cameras_dict,
