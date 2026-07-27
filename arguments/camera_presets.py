@@ -114,10 +114,15 @@ def get_optimization_profile(
 
 
 def apply_profile(
-    params: ModelParams, opt: OptimizationParams, dls: int
+    params: ModelParams,
+    opt: OptimizationParams,
+    dls: int,
+    profile_override: str = "",
 ) -> Tuple[OptimizationParams, str]:
     """Return tuned optimization params and the profile key used."""
 
-    profile = resolve_camera_profile(params, dls)
+    profile = profile_override or resolve_camera_profile(params, dls)
+    if profile not in BEST_CAMERA_CONFIG:
+        raise ValueError(f"Unknown camera profile: {profile}")
     tuned_opt = get_optimization_profile(opt, profile)
     return tuned_opt, profile

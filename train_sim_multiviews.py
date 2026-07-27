@@ -557,6 +557,12 @@ if __name__ == "__main__":
     )
     parser.add_argument("--start_checkpoint", type=str, default=None)
     parser.add_argument("--dls", type=int, default=20)
+    parser.add_argument(
+        "--camera_profile",
+        choices=("base", "iphone", "stereo", "lightfield", "multiplexing"),
+        default="",
+        help="Apply a camera optimization profile without changing the input forward model.",
+    )
     parser.add_argument("--size_threshold", type=int, default=150)
     parser.add_argument("--extent_multiplier", type=float, default=1.0)
     parser.add_argument("--output-id", type=str, default="3")
@@ -603,7 +609,7 @@ if __name__ == "__main__":
     if opt.iterations not in args.save_iterations:
         args.save_iterations.append(opt.iterations)
 
-    opt, camera_profile = apply_profile(dataset, opt, args.dls)
+    opt, camera_profile = apply_profile(dataset, opt, args.dls, args.camera_profile)
     print(f"Applied '{camera_profile}' hyperparameter preset")
 
     run_name = compose_run_name(dataset, opt, args.dls)
