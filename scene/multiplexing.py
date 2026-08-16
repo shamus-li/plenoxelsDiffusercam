@@ -111,7 +111,9 @@ def generate_alpha_map(comap_yx, num_lens, H, W):
 
     alpha_map = np.zeros((H, W))
     non_zero_mask = overlap_count > 0
-    alpha_map[non_zero_mask] = 1.0 / overlap_count[non_zero_mask]
+    max_overlap = overlap_count.max()
+    if max_overlap > 0:
+        alpha_map[non_zero_mask] = 1.0 / max_overlap
     return alpha_map
 
 
@@ -121,9 +123,8 @@ def compute_throughput_map(
     """
     Compute per-microlens weights without angular feathering.
 
-    Each microlens contributes uniformly across its footprint; contributions are
-    normalised so that, for every covered sensor pixel, the per-microlens weights
-    sum to one.
+    Each microlens contributes uniformly across its footprint. All contributions
+    are normalised by the maximum overlap anywhere on the sensor.
     """
     if comap_yx.shape[0] != num_lens:
         raise ValueError("Number of microlenses does not match comap shape")
@@ -143,16 +144,8 @@ def compute_throughput_map(
         torch.zeros_like(comap_yx[..., 0]),
     )
     pixel_weight_sum = weights.sum(dim=0)
-    safe_coverage = torch.where(
-        pixel_weight_sum > 0.0,
-        pixel_weight_sum,
-        torch.ones_like(pixel_weight_sum),
-    )
-
-    microlens_weights = weights / safe_coverage.unsqueeze(0)
-    microlens_weights = torch.where(
-        valid_mask, microlens_weights, torch.zeros_like(microlens_weights)
-    )
+    max_overlap = pixel_weight_sum.max().clamp_min(1.0)
+    microlens_weights = weights / max_overlap
 
     coverage_mask = pixel_weight_sum > 0.0
     return microlens_weights, coverage_mask
@@ -215,8 +208,7 @@ def generate(
             y_indices, x_indices = torch.where(valid_mask)
             y_src = y_coords[valid_mask].long()
             x_src = x_coords[valid_mask].long()
-            # Weights are normalised per pixel, so the accumulation below is a
-            # true weighted average of sub-views.
+            # All weights share the sensor-wide maximum-overlap normalizer.
             weights = microlens_weights[i, y_indices, x_indices]
             output_linear[:, y_indices, x_indices] += (
                 resized_linear[i, :, y_src, x_src] * weights.unsqueeze(0)
