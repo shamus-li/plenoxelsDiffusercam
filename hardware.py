@@ -3,34 +3,9 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-
-
-def _load_config(path: Path) -> dict[str, Any]:
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict):
-        raise ValueError(f"Expected a JSON object: {path}")
-    return payload
-
-
-def _configure_torch_cache(config: dict[str, Any]) -> None:
-    import torch
-
-    source = Path(config["torch_checkpoint_dir"])
-    cache = Path(config["model_dir"]) / "torch_cache"
-    checkpoints = cache / "hub" / "checkpoints"
-    checkpoints.mkdir(parents=True, exist_ok=True)
-    for name in ("vgg16-397923af.pth", "vgg.pth"):
-        destination = checkpoints / name
-        if destination.exists() and destination.samefile(source / name):
-            continue
-        if destination.exists() or destination.is_symlink():
-            destination.unlink()
-        destination.symlink_to((source / name).resolve())
-    torch.hub.set_dir(str(cache / "hub"))
 
 
 class _HardwareScene:
@@ -75,10 +50,8 @@ class _HardwareScene:
 
 
 def _load_scene(
-    config: dict[str, Any],
+    root: Path,
     *,
-    scene_key: str,
-    expected_key: str,
     gaussians: Any,
     training: bool,
 ) -> _HardwareScene:
@@ -95,7 +68,7 @@ def _load_scene(
     from utils.general_utils import PILtoTorch  # ty: ignore[unresolved-import]
     from utils.graphics_utils import focal2fov, getWorld2View2  # ty: ignore[unresolved-import]
 
-    scene_dir = Path(config[scene_key])
+    scene_dir = root / "dataset" / ("train_scene" if training else "eval_scene")
     sparse = scene_dir / "sparse"
     extrinsics = read_extrinsics_text(str(sparse / "images.txt"))
     intrinsics = read_intrinsics_text(str(sparse / "cameras.txt"))
@@ -111,8 +84,8 @@ def _load_scene(
         if not image_path.is_file() or not mask_path.is_file():
             raise FileNotFoundError(f"Missing hardware image or mask: {image_path}, {mask_path}")
         image = Image.open(image_path).convert("RGB")
-        width = round(image.width / int(config["resolution"]))
-        height = round(image.height / int(config["resolution"]))
+        width = round(image.width / 8)
+        height = round(image.height / 8)
         image_tensor = PILtoTorch(image, (width, height))[:3]
         mask_image = Image.fromarray(
             (np.asarray(Image.open(mask_path).convert("L")) > 0).astype(np.uint8) * 255
@@ -138,17 +111,13 @@ def _load_scene(
         cameras.append(camera)
         camera_centers.append(np.linalg.inv(getWorld2View2(rotation, translation))[:3, 3])
     cameras.sort(key=lambda camera: camera.image_name)
-    expected = int(config[expected_key])
-    if len(cameras) != expected:
-        raise ValueError(f"Expected {expected} hardware views, got {len(cameras)}.")
-
     centers = np.stack(camera_centers)
     radius = float(np.linalg.norm(centers - centers.mean(axis=0), axis=1).max() * 1.1)
     point_cloud = None
     if training:
         from plyfile import PlyData  # ty: ignore[unresolved-import]
 
-        point_cloud_path = Path(config["initial_point_cloud"])
+        point_cloud_path = root / "dataset" / "initial_points.ply"
         if not point_cloud_path.is_file():
             raise FileNotFoundError(f"Missing hardware initialization: {point_cloud_path}")
         vertices = PlyData.read(point_cloud_path)["vertex"].data
@@ -164,7 +133,7 @@ def _load_scene(
             normals = np.zeros_like(xyz)
         point_cloud = BasicPointCloud(points=xyz, colors=rgb, normals=normals)
     return _HardwareScene(
-        model_dir=Path(config["model_dir"]),
+        model_dir=root / "run",
         gaussians=gaussians,
         cameras=cameras,
         point_cloud=point_cloud,
@@ -173,16 +142,16 @@ def _load_scene(
     )
 
 
-def _dataset(config: dict[str, Any]) -> SimpleNamespace:
+def _dataset(root: Path) -> SimpleNamespace:
     return SimpleNamespace(
         sh_degree=3,
-        model_path=str(Path(config["model_dir"]).resolve()),
+        model_path=str((root / "run").resolve()),
         white_background=False,
         use_multiplexing=False,
     )
 
 
-def _train(config: dict[str, Any]) -> None:
+def _train(root: Path) -> None:
     import torch
 
     import train_sim_multiviews as trainer  # ty: ignore[unresolved-import]
@@ -191,9 +160,6 @@ def _train(config: dict[str, Any]) -> None:
 
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required for hardware training.")
-    if int(config["iterations"]) != 8_000 or int(config["seed"]) != 0:
-        raise ValueError("Hardware training requires 8,000 iterations and seed 0.")
-
     def masked_l1_loss(output: Any, target: Any, camera: Any) -> Any:
         mask = camera.mask.to(output.device)
         return (torch.abs(output - target) * mask).sum() / (
@@ -201,12 +167,10 @@ def _train(config: dict[str, Any]) -> None:
         )
 
     safe_state(False)
-    dataset = _dataset(config)
+    dataset = _dataset(root)
     gaussians = GaussianModel(dataset.sh_degree)
     scene = _load_scene(
-        config,
-        scene_key="scene_dir",
-        expected_key="expected_train_views",
+        root,
         gaussians=gaussians,
         training=True,
     )
@@ -254,8 +218,8 @@ def _train(config: dict[str, Any]) -> None:
         dataset=dataset,
         opt=optimization,
         pipe=pipeline,
-        testing_iterations=[6_000, 8_000],
-        saving_iterations=[6_000, 8_000],
+        testing_iterations=[],
+        saving_iterations=[8_000],
         debug_from=-1,
         resolution=8,
         dls=20,
@@ -268,7 +232,7 @@ def _train(config: dict[str, Any]) -> None:
     )
 
 
-def _evaluate(config: dict[str, Any]) -> None:
+def _evaluate(root: Path) -> None:
     import imageio.v3 as iio
     import numpy as np
     import torch
@@ -280,7 +244,7 @@ def _evaluate(config: dict[str, Any]) -> None:
 
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required for hardware evaluation.")
-    dataset = _dataset(config)
+    dataset = _dataset(root)
     pipeline = SimpleNamespace(
         convert_SHs_python=False,
         compute_cov3D_python=False,
@@ -289,119 +253,61 @@ def _evaluate(config: dict[str, Any]) -> None:
     )
     gaussians = GaussianModel(dataset.sh_degree)
     scene = _load_scene(
-        config,
-        scene_key="eval_scene_dir",
-        expected_key="expected_eval_views",
+        root,
         gaussians=gaussians,
         training=False,
     )
-    iteration = int(config["checkpoint_iteration"])
-    point_cloud = (
-        Path(config["model_dir"]) / "point_cloud" / f"iteration_{iteration}" / "point_cloud.ply"
-    )
+    point_cloud = root / "run" / "point_cloud" / "iteration_8000" / "point_cloud.ply"
     if not point_cloud.is_file():
         raise FileNotFoundError(f"Missing trained point cloud: {point_cloud}")
     gaussians.load_ply(str(point_cloud))
-    requested = set(config["heldout"])
-    cameras = [camera for camera in scene.getFullTestCameras() if camera.image_name in requested]
-    if [camera.image_name for camera in cameras] != sorted(requested):
-        raise ValueError("Held-out hardware cameras do not match the requested view list.")
+    training_images = {path.name for path in (root / "dataset/train_scene/images").iterdir()}
+    cameras = [
+        camera for camera in scene.getFullTestCameras() if camera.image_name not in training_images
+    ]
 
-    out_dir = Path(config["eval_dir"])
+    out_dir = root / "renders"
     out_dir.mkdir(parents=True, exist_ok=True)
-    prediction_dir = out_dir / "predictions"
-    ground_truth_dir = out_dir / "ground_truth"
-    mask_dir = out_dir / "masks"
-    prediction_dir.mkdir(exist_ok=True)
-    ground_truth_dir.mkdir(exist_ok=True)
-    mask_dir.mkdir(exist_ok=True)
     background = torch.zeros(3, dtype=torch.float32, device="cuda")
     lpips_metric = LPIPS(net_type="vgg").to("cuda").eval()
     for parameter in lpips_metric.parameters():
         parameter.requires_grad_(False)
-    totals = {"l1": 0.0, "psnr": 0.0, "ssim": 0.0, "lpips": 0.0, "mask_coverage": 0.0}
-    rows = []
-    panels = []
+    totals = {"psnr": 0.0, "ssim": 0.0, "lpips": 0.0}
     with torch.no_grad():
-        for index, camera in enumerate(cameras):
+        for camera in cameras:
             prediction = render(camera, gaussians, pipeline, background)["render"].clamp(0.0, 1.0)
             ground_truth = camera.original_image.clamp(0.0, 1.0)
             mask = camera.mask.to("cuda")
             masked_prediction = prediction * mask
             denominator = mask.sum().clamp_min(1.0) * prediction.shape[0]
             squared_error = ((masked_prediction - ground_truth) ** 2 * mask).sum()
-            row = {
-                "image_name": camera.image_name,
-                "l1": float(
-                    (torch.abs(masked_prediction - ground_truth) * mask).sum() / denominator
-                ),
+            metrics = {
                 "psnr": float(20 * torch.log10(1.0 / torch.sqrt(squared_error / denominator))),
                 "ssim": float(ssim(masked_prediction, ground_truth)),
                 "lpips": float(lpips_metric(masked_prediction[None], ground_truth[None]).mean()),
-                "mask_coverage": float(mask.mean()),
             }
             for key in totals:
-                totals[key] += float(row[key])
-            rows.append(row)
-            difference = (
-                (masked_prediction - ground_truth).abs().mean(0, keepdim=True).repeat(3, 1, 1)
-            )
-            panel = torch.cat([ground_truth, masked_prediction, difference.clamp(0.0, 1.0)], dim=2)
-            panels.append(panel)
+                totals[key] += metrics[key]
             image_stem = Path(camera.image_name).stem
             iio.imwrite(
-                prediction_dir / f"{image_stem}.png",
+                out_dir / f"{image_stem}.png",
                 (prediction.permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8),
             )
-            iio.imwrite(
-                ground_truth_dir / f"{image_stem}.png",
-                (ground_truth.permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8),
-            )
-            iio.imwrite(
-                mask_dir / f"{image_stem}.png",
-                (mask[0].cpu().numpy() * 255).astype(np.uint8),
-            )
-            image = (panel.permute(1, 2, 0).cpu().numpy().clip(0.0, 1.0) * 255).astype(np.uint8)
-            iio.imwrite(
-                out_dir / f"{index:03d}_{Path(camera.image_name).stem}_gt_pred_diff.png", image
-            )
-    count = len(rows)
-    summary = {
-        "iteration": iteration,
-        "num_views": count,
-        "mean": {key: value / count for key, value in totals.items()},
-        "per_view": rows,
-        "renders": {
-            "predictions": str(prediction_dir.resolve()),
-            "ground_truth": str(ground_truth_dir.resolve()),
-            "masks": str(mask_dir.resolve()),
-        },
-    }
-    if not math.isfinite(summary["mean"]["psnr"]):
-        raise RuntimeError("Non-finite hardware PSNR.")
-    iio.imwrite(
-        out_dir / "heldout_gt_pred_diff_panel.png",
-        (torch.cat(panels, dim=1).permute(1, 2, 0).cpu().numpy().clip(0.0, 1.0) * 255).astype(
-            np.uint8
-        ),
-    )
-    (out_dir / "metrics_summary.json").write_text(
-        json.dumps(summary, indent=2) + "\n", encoding="utf-8"
-    )
-    print(json.dumps(summary, indent=2))
+    metrics = {key: value / len(cameras) for key, value in totals.items()}
+    (root / "metrics.json").write_text(json.dumps(metrics, indent=2, sort_keys=True) + "\n")
+    print(json.dumps(metrics, indent=2))
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("stage", choices=("train", "eval"))
-    parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--data", type=Path, required=True)
     args = parser.parse_args()
-    config = _load_config(args.config)
-    _configure_torch_cache(config)
+    root = args.data.expanduser().resolve()
     if args.stage == "train":
-        _train(config)
+        _train(root)
     else:
-        _evaluate(config)
+        _evaluate(root)
 
 
 if __name__ == "__main__":
